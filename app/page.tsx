@@ -124,17 +124,19 @@ export default function Home() {
   setError(null);
   try {
     const payload = {
-      dateKey,
-      status: nextStatus,
-      items: items.map((it) => ({
-        id: it.id,
-        name: it.name,
-        time: it.time,
-        reason: it.reason ?? null,
-        priority: it.priority ?? null,
-        done: it.done ?? false,
-      })),
-    };
+  dateKey,
+  status: nextStatus,
+  plan: {
+    items: items.map((it) => ({
+      id: it.id,
+      name: it.name,
+      time: it.time,
+      reason: it.reason ?? null,
+      priority: it.priority ?? null,
+      done: it.done ?? false,
+    })),
+  },
+};
 
     const res = await fetch(`/api/plan`, {
       method: "PUT",
