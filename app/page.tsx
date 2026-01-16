@@ -78,27 +78,50 @@ export default function Home() {
   }, [journal, journalKey]);
 
   async function apiGetPlan(targetDateKey: string) {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/plan?dateKey=${encodeURIComponent(targetDateKey)}`, {
-        cache: "no-store",
-      });
-      const data = (await res.json()) as PlanResponse | { ok: false; error: string };
-      if (!res.ok || !("ok" in data) || !data.ok) {
-        const msg = (data as any)?.error || "계획을 불러오지 못했습니다.";
-        throw new Error(msg);
-      }
-      setStatus(data.status);
-      setItems(data.items || []);
-    } catch (e: any) {
+  setLoading(true);
+  setError(null);
+  try {
+    const res = await fetch(`/api/plan?dateKey=${encodeURIComponent(targetDateKey)}`, {
+      cache: "no-store",
+    });
+
+    const json = await res.json();
+
+    if (!res.ok || !json?.ok) {
+      throw new Error(json?.error || "계획을 불러오지 못했습니다.");
+    }
+
+    // ✅ 서버가 주는 형태: { ok:true, data: { status, plan:{ items:[...] } } }
+    const row = json.data;
+
+    if (!row) {
       setStatus("draft");
       setItems([]);
-      setError(e?.message || "오류가 발생했습니다.");
-    } finally {
-      setLoading(false);
+      return;
     }
+
+    setStatus(row.status || "draft");
+
+    const serverItems = Array.isArray(row?.plan?.items) ? row.plan.items : [];
+    // done이 없는 예전 데이터도 false로 보정
+    setItems(
+      serverItems.map((it: any) => ({
+        id: it.id,
+        name: it.name,
+        time: it.time || "09:00",
+        done: typeof it.done === "boolean" ? it.done : false,
+        reason: it.reason ?? null,
+        priority: it.priority ?? null,
+      }))
+    );
+  } catch (e: any) {
+    setStatus("draft");
+    setItems([]);
+    setError(e?.message || "오류가 발생했습니다.");
+  } finally {
+    setLoading(false);
   }
+}
 
   async function apiGenerateDraft() {
     setLoading(true);
