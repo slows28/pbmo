@@ -120,30 +120,40 @@ export default function Home() {
   }
 
   async function apiSave(nextStatus: PlanStatus) {
-    setLoading(true);
-    setError(null);
-    try {
-      const payload = {
-        dateKey,
-        status: nextStatus,
-        items,
-      };
-      const res = await fetch(`/api/plan`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "저장에 실패했습니다.");
-      }
-      setStatus(nextStatus);
-    } catch (e: any) {
-      setError(e?.message || "오류가 발생했습니다.");
-    } finally {
-      setLoading(false);
+  setLoading(true);
+  setError(null);
+  try {
+    const payload = {
+      dateKey,
+      status: nextStatus,
+      items: items.map((it) => ({
+        id: it.id,
+        name: it.name,
+        time: it.time,
+        reason: it.reason ?? null,
+        priority: it.priority ?? null,
+        done: it.done ?? false,
+      })),
+    };
+
+    const res = await fetch(`/api/plan`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data?.ok) {
+      throw new Error(data?.error || "저장에 실패했습니다.");
     }
+
+    setStatus(nextStatus);
+  } catch (e: any) {
+    setError(e?.message || "오류가 발생했습니다.");
+  } finally {
+    setLoading(false);
   }
+}
 
   useEffect(() => {
     apiGetPlan(dateKey);
