@@ -6,18 +6,18 @@ type PlanItem = {
   id: string;
   name: string;
   time: string; // "HH:MM"
-  priority?: number;
-  reason?: string;
+  done: boolean;
+  reason?: string | null;
+  priority?: number | null;
 };
 
-type DailyPlanRow = {
-  date_key: string;
-  status: "draft" | "confirmed";
-  plan: {
-    dateKey: string;
-    items: PlanItem[];
-    generatedAt?: string;
-  };
+type PlanStatus = "draft" | "confirmed";
+
+type PlanResponse = {
+  ok: boolean;
+  dateKey: string;
+  status: PlanStatus;
+  items: PlanItem[];
 };
 
 function todayKey(): string {
@@ -28,267 +28,407 @@ function todayKey(): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function newId() {
-  return crypto.randomUUID();
+function cn(...v: Array<string | false | null | undefined>) {
+  return v.filter(Boolean).join(" ");
 }
 
-function clampTime(v: string) {
-  // 아주 단순 검증 (비면 09:00)
-  if (!/^\d{2}:\d{2}$/.test(v)) return "09:00";
-  return v;
+function clampTime(t: string): string {
+  // basic guard: enforce "HH:MM"
+  if (!t) return "09:00";
+  const m = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return "09:00";
+  let hh = Math.min(23, Math.max(0, Number(m[1])));
+  let mm = Math.min(59, Math.max(0, Number(m[2])));
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
 }
+
+const LAST_DATE_KEY = "pbmo_last_date";
 
 export default function Home() {
-  const [dateKey, setDateKey] = useState(todayKey());
+  const [dateKey, setDateKey] = useState(() => {
+    if (typeof window === "undefined") return todayKey();
+    return localStorage.getItem(LAST_DATE_KEY) || todayKey();
+  });
 
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  const [row, setRow] = useState<DailyPlanRow | null>(null);
+  const [status, setStatus] = useState<PlanStatus>("draft");
   const [items, setItems] = useState<PlanItem[]>([]);
-  const [status, setStatus] = useState<"draft" | "confirmed">("draft");
+  const [error, setError] = useState<string | null>(null);
 
-  const progressText = useMemo(() => {
-    // 현재는 "완료체크"를 DB에 저장하지 않으므로 진행률은 임시로 숨김/확장 여지
-    return status === "confirmed" ? "확정됨" : "초안";
-  }, [status]);
+  const [newName, setNewName] = useState("");
+  const [newTime, setNewTime] = useState("09:00");
 
-  async function loadPlan(targetDate: string) {
+  // local journal (iOS memo 느낌: 일단 로컬 유지)
+  const journalKey = useMemo(() => `pbmo_journal_${dateKey}`, [dateKey]);
+  const [journal, setJournal] = useState("");
+
+  useEffect(() => {
+    localStorage.setItem(LAST_DATE_KEY, dateKey);
+  }, [dateKey]);
+
+  useEffect(() => {
+    // journal load
+    const saved = localStorage.getItem(journalKey);
+    setJournal(saved || "");
+  }, [journalKey]);
+
+  useEffect(() => {
+    // journal save
+    localStorage.setItem(journalKey, journal);
+  }, [journal, journalKey]);
+
+  async function apiGetPlan(targetDateKey: string) {
     setLoading(true);
+    setError(null);
     try {
-      const res = await fetch(`/api/plan?date=${encodeURIComponent(targetDate)}`);
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || "load failed");
-
-      const data = json.data as DailyPlanRow | null;
-      setRow(data);
-
-      if (!data) {
-        setItems([]);
-        setStatus("draft");
-        return;
+      const res = await fetch(`/api/plan?dateKey=${encodeURIComponent(targetDateKey)}`, {
+        cache: "no-store",
+      });
+      const data = (await res.json()) as PlanResponse | { ok: false; error: string };
+      if (!res.ok || !("ok" in data) || !data.ok) {
+        const msg = (data as any)?.error || "계획을 불러오지 못했습니다.";
+        throw new Error(msg);
       }
-
-      setItems(Array.isArray(data.plan?.items) ? data.plan.items : []);
       setStatus(data.status);
+      setItems(data.items || []);
+    } catch (e: any) {
+      setStatus("draft");
+      setItems([]);
+      setError(e?.message || "오류가 발생했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function apiGenerateDraft() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/generate-draft?dateKey=${encodeURIComponent(dateKey)}`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "초안 생성에 실패했습니다.");
+      }
+      await apiGetPlan(dateKey);
+    } catch (e: any) {
+      setError(e?.message || "오류가 발생했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function apiSave(nextStatus: PlanStatus) {
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = {
+        dateKey,
+        status: nextStatus,
+        items,
+      };
+      const res = await fetch(`/api/plan`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "저장에 실패했습니다.");
+      }
+      setStatus(nextStatus);
+    } catch (e: any) {
+      setError(e?.message || "오류가 발생했습니다.");
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    loadPlan(dateKey);
+    apiGetPlan(dateKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dateKey]);
 
-  async function generateDraft() {
-    setLoading(true);
-    try {
-      // 기존에 만든 draft 생성 API 호출
-      const res = await fetch("/api/generate-draft");
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || "generate failed");
+  const doneCount = items.filter((x) => x.done).length;
+  const progressPct = items.length ? Math.round((doneCount / items.length) * 100) : 0;
 
-      // 생성 후 다시 로드
-      await loadPlan(dateKey);
-    } finally {
-      setLoading(false);
-    }
+  function toggleDone(id: string) {
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, done: !it.done } : it)));
   }
 
-  async function save(statusToSave: "draft" | "confirmed") {
-    setSaving(true);
-    try {
-      const plan = {
-        dateKey,
-        items: items.map((it, idx) => ({
-          ...it,
-          time: clampTime(it.time),
-          priority: idx + 1,
-        })),
-        generatedAt: row?.plan?.generatedAt ?? new Date().toISOString(),
-      };
-
-      const res = await fetch("/api/plan", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dateKey, status: statusToSave, plan }),
-      });
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || "save failed");
-
-      await loadPlan(dateKey);
-    } finally {
-      setSaving(false);
-    }
+  function updateTime(id: string, time: string) {
+    const t = clampTime(time);
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, time: t } : it)));
   }
 
-  function updateItem(id: string, patch: Partial<PlanItem>) {
-    setItems((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)));
-  }
-
-  function addItem() {
-    setItems((prev) => [
-      ...prev,
-      { id: newId(), name: "새 행동", time: "09:00", reason: "수동 추가" },
-    ]);
+  function updateName(id: string, name: string) {
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, name } : it)));
   }
 
   function removeItem(id: string) {
-    setItems((prev) => prev.filter((x) => x.id !== id));
+    setItems((prev) => prev.filter((it) => it.id !== id));
   }
 
-  const card: React.CSSProperties = {
-    border: "1px solid #e5e7eb",
-    borderRadius: 12,
-    padding: 14,
-    background: "white",
-  };
+  function addItem() {
+    const name = newName.trim();
+    if (!name) return;
+    const id = crypto.randomUUID();
+    setItems((prev) => [{ id, name, time: clampTime(newTime), done: false }, ...prev]);
+    setNewName("");
+  }
 
-  const btn: React.CSSProperties = {
-    padding: "10px 12px",
-    borderRadius: 10,
-    border: "1px solid #d1d5db",
-    background: "white",
-    cursor: "pointer",
-    fontWeight: 600,
-  };
-
-  const btnPrimary: React.CSSProperties = {
-    ...btn,
-    background: "#111827",
-    color: "white",
-    borderColor: "#111827",
-  };
+  const sortedItems = useMemo(() => {
+    // iOS 느낌: 시간순 정렬 + done은 맨 아래
+    const copy = [...items];
+    copy.sort((a, b) => {
+      if (a.done !== b.done) return a.done ? 1 : -1;
+      return a.time.localeCompare(b.time);
+    });
+    return copy;
+  }, [items]);
 
   return (
-    <main
-      style={{
-        fontFamily: "system-ui",
-        maxWidth: 900,
-        margin: "0 auto",
-        padding: 16,
-        background: "#f9fafb",
-        minHeight: "100vh",
-      }}
-    >
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "end" }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800 }}>PBMO (1인용)</h1>
-          <div style={{ marginTop: 6, color: "#6b7280", fontSize: 13 }}>
-            상태: <b style={{ color: "#111827" }}>{progressText}</b>
-            {loading ? " · 로딩중..." : ""}
-          </div>
-        </div>
-
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 13, color: "#374151" }}>날짜</span>
-            <input
-              type="date"
-              value={dateKey}
-              onChange={(e) => setDateKey(e.target.value)}
-              style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #d1d5db" }}
-            />
-          </label>
-        </div>
-      </header>
-
-      <section style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
-        <div style={card}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-            <div>
-              <div style={{ fontWeight: 800, fontSize: 14, color: "#111827" }}>오늘 계획</div>
-              <div style={{ marginTop: 6, color: "#6b7280", fontSize: 13 }}>
-                DB에서 불러온 계획을 수정하고 확정합니다.
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button style={btn} onClick={generateDraft} disabled={loading}>
-                초안 생성(자동)
-              </button>
-              <button style={btn} onClick={addItem} disabled={loading}>
-                항목 추가
-              </button>
-              <button style={btnPrimary} onClick={() => save("draft")} disabled={saving || loading}>
-                초안 저장
-              </button>
-              <button style={btnPrimary} onClick={() => save("confirmed")} disabled={saving || loading}>
-                확정 저장
-              </button>
-            </div>
+    <main className="min-h-screen bg-[#F2F2F7] text-[#111]">
+      {/* iOS-like top bar */}
+      <div className="sticky top-0 z-20 border-b border-black/5 bg-white/80 backdrop-blur">
+        <div className="mx-auto flex max-w-[760px] items-center justify-between px-4 py-3">
+          <div className="flex items-baseline gap-2">
+            <h1 className="text-[20px] font-semibold tracking-tight">PBMO</h1>
+            <span className="text-[12px] text-black/50">1인용</span>
           </div>
 
-          <div style={{ marginTop: 12 }}>
-            {!row && items.length === 0 ? (
-              <div style={{ padding: 12, borderRadius: 10, background: "#f3f4f6", color: "#374151" }}>
-                아직 오늘 계획이 없습니다. <b>“초안 생성(자동)”</b>을 눌러 시작하세요.
-              </div>
-            ) : items.length === 0 ? (
-              <div style={{ padding: 12, borderRadius: 10, background: "#fef3c7", color: "#92400e" }}>
-                계획은 존재하지만 items가 비어 있습니다. 항목을 추가하고 저장하세요.
-              </div>
-            ) : (
-              <div style={{ display: "grid", gap: 10 }}>
-                {items.map((it, idx) => (
-                  <div
-                    key={it.id}
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "90px 1fr 90px",
-                      gap: 10,
-                      alignItems: "center",
-                      padding: 12,
-                      borderRadius: 12,
-                      border: "1px solid #e5e7eb",
-                      background: "white",
-                    }}
-                  >
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <div style={{ fontSize: 12, color: "#6b7280" }}>시간</div>
-                      <input
-                        value={it.time}
-                        onChange={(e) => updateItem(it.id, { time: e.target.value })}
-                        placeholder="HH:MM"
-                        style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #d1d5db" }}
-                      />
-                    </div>
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "rounded-full px-2.5 py-1 text-[12px] font-medium",
+                status === "confirmed"
+                  ? "bg-emerald-50 text-emerald-700"
+                  : "bg-sky-50 text-sky-700"
+              )}
+            >
+              {status === "confirmed" ? "확정" : "초안"}
+            </span>
+          </div>
+        </div>
+      </div>
 
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                        <div style={{ fontSize: 12, color: "#6b7280" }}>행동 #{idx + 1}</div>
-                        <div style={{ fontSize: 12, color: "#9ca3af" }}>
-                          {it.reason ? `이유: ${it.reason}` : ""}
-                        </div>
-                      </div>
-                      <input
-                        value={it.name}
-                        onChange={(e) => updateItem(it.id, { name: e.target.value })}
-                        style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #d1d5db" }}
-                      />
-                    </div>
+      <div className="mx-auto max-w-[760px] px-4 pb-16 pt-4">
+        {/* Date + actions card */}
+        <section className="rounded-3xl bg-white p-4 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="rounded-2xl bg-[#F2F2F7] px-3 py-2">
+                <div className="text-[11px] text-black/50">날짜</div>
+                <input
+                  type="date"
+                  value={dateKey}
+                  onChange={(e) => setDateKey(e.target.value)}
+                  className="mt-0.5 bg-transparent text-[15px] font-medium outline-none"
+                />
+              </div>
 
-                    <button style={btn} onClick={() => removeItem(it.id)} disabled={loading}>
-                      삭제
-                    </button>
+              <div className="min-w-[120px]">
+                <div className="text-[11px] text-black/50">오늘 진행률</div>
+                <div className="mt-1 flex items-center gap-2">
+                  <div className="h-2 w-28 overflow-hidden rounded-full bg-[#E5E5EA]">
+                    <div
+                      className="h-full rounded-full bg-[#0A84FF]"
+                      style={{ width: `${progressPct}%` }}
+                    />
                   </div>
-                ))}
+                  <div className="text-[13px] font-semibold">
+                    {doneCount}/{items.length}
+                  </div>
+                </div>
               </div>
-            )}
-          </div>
-        </div>
+            </div>
 
-        <div style={{ ...card, background: "#0b1220", color: "white" }}>
-          <div style={{ fontWeight: 800, fontSize: 14 }}>지금 단계에서 가능한 것</div>
-          <ul style={{ marginTop: 10, lineHeight: 1.7, color: "#d1d5db" }}>
-            <li>초안 자동 생성(템플릿 기반) → DB 저장</li>
-            <li>DB의 오늘 계획을 화면에 표시</li>
-            <li>시간/이름 수정, 항목 추가/삭제</li>
-            <li>초안 저장(draft) / 확정 저장(confirmed)</li>
-          </ul>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={apiGenerateDraft}
+                disabled={loading}
+                className={cn(
+                  "rounded-2xl px-3.5 py-2 text-[14px] font-semibold",
+                  "bg-[#0A84FF] text-white",
+                  "disabled:opacity-50"
+                )}
+              >
+                초안 생성
+              </button>
+              <button
+                onClick={() => apiSave("draft")}
+                disabled={loading}
+                className={cn(
+                  "rounded-2xl px-3.5 py-2 text-[14px] font-semibold",
+                  "bg-[#F2F2F7] text-black/85",
+                  "disabled:opacity-50"
+                )}
+              >
+                저장
+              </button>
+              <button
+                onClick={() => apiSave("confirmed")}
+                disabled={loading}
+                className={cn(
+                  "rounded-2xl px-3.5 py-2 text-[14px] font-semibold",
+                  "bg-[#111827] text-white",
+                  "disabled:opacity-50"
+                )}
+              >
+                확정
+              </button>
+            </div>
+          </div>
+
+          {error ? (
+            <div className="mt-3 rounded-2xl bg-red-50 px-3 py-2 text-[13px] text-red-700">
+              {error}
+            </div>
+          ) : null}
+
+          {loading ? (
+            <div className="mt-3 text-[12px] text-black/45">불러오는 중…</div>
+          ) : null}
+        </section>
+
+        {/* Add item */}
+        <section className="mt-4 rounded-3xl bg-white p-4 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
+          <div className="text-[13px] font-semibold text-black/80">행동 추가</div>
+
+          <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_140px_96px] sm:items-center">
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="예: 스트레칭 5분"
+              className="w-full rounded-2xl border border-black/10 bg-[#F2F2F7] px-4 py-3 text-[15px] outline-none focus:border-black/20"
+            />
+
+            <div className="rounded-2xl border border-black/10 bg-[#F2F2F7] px-4 py-3">
+              <div className="text-[11px] text-black/50">시간</div>
+              <input
+                type="time"
+                value={newTime}
+                onChange={(e) => setNewTime(clampTime(e.target.value))}
+                className="mt-0.5 w-full bg-transparent text-[15px] font-medium outline-none"
+              />
+            </div>
+
+            <button
+              onClick={addItem}
+              className="rounded-2xl bg-[#34C759] px-4 py-3 text-[15px] font-semibold text-white"
+            >
+              추가
+            </button>
+          </div>
+
+          <div className="mt-2 text-[12px] text-black/45">
+            팁: 시간 기반으로 정렬되며, 완료한 항목은 아래로 내려갑니다.
+          </div>
+        </section>
+
+        {/* List */}
+        <section className="mt-4">
+          <div className="mb-2 px-1 text-[13px] font-semibold text-black/70">오늘 계획</div>
+
+          <div className="space-y-2">
+            {sortedItems.length === 0 ? (
+              <div className="rounded-3xl bg-white p-5 text-[14px] text-black/55 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
+                아직 오늘 계획이 없습니다. <span className="font-semibold">초안 생성</span>을 눌러 시작하세요.
+              </div>
+            ) : null}
+
+            {sortedItems.map((it) => (
+              <div
+                key={it.id}
+                className={cn(
+                  "rounded-3xl bg-white p-4 shadow-[0_6px_20px_rgba(0,0,0,0.06)]",
+                  it.done && "opacity-70"
+                )}
+              >
+                <div className="flex items-start gap-3">
+                  <button
+                    onClick={() => toggleDone(it.id)}
+                    className={cn(
+                      "mt-0.5 h-6 w-6 shrink-0 rounded-full border",
+                      it.done
+                        ? "border-[#34C759] bg-[#34C759]"
+                        : "border-black/15 bg-white"
+                    )}
+                    aria-label="toggle done"
+                    title="완료 체크"
+                  >
+                    <div className={cn("h-full w-full", it.done ? "block" : "hidden")}>
+                      <div className="flex h-full w-full items-center justify-center text-white">
+                        ✓
+                      </div>
+                    </div>
+                  </button>
+
+                  <div className="min-w-0 flex-1">
+                    <input
+                      value={it.name}
+                      onChange={(e) => updateName(it.id, e.target.value)}
+                      className={cn(
+                        "w-full bg-transparent text-[16px] font-semibold outline-none",
+                        it.done ? "line-through text-black/50" : "text-black"
+                      )}
+                    />
+
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <div className="rounded-2xl border border-black/10 bg-[#F2F2F7] px-3 py-2">
+                        <div className="text-[11px] text-black/50">시간</div>
+                        <input
+                          type="time"
+                          value={clampTime(it.time)}
+                          onChange={(e) => updateTime(it.id, e.target.value)}
+                          className="mt-0.5 bg-transparent text-[14px] font-semibold outline-none"
+                        />
+                      </div>
+
+                      {it.reason ? (
+                        <div className="min-w-[180px] flex-1 rounded-2xl bg-[#F2F2F7] px-3 py-2">
+                          <div className="text-[11px] text-black/50">추천 이유</div>
+                          <div className="mt-0.5 text-[13px] text-black/70">{it.reason}</div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => removeItem(it.id)}
+                    className="rounded-2xl bg-[#FF3B30] px-3 py-2 text-[13px] font-semibold text-white"
+                    title="삭제"
+                  >
+                    삭제
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Journal */}
+        <section className="mt-6 rounded-3xl bg-white p-4 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
+          <div className="flex items-center justify-between">
+            <div className="text-[13px] font-semibold text-black/80">저널</div>
+            <div className="text-[12px] text-black/45">3줄만 써도 충분</div>
+          </div>
+
+          <textarea
+            value={journal}
+            onChange={(e) => setJournal(e.target.value)}
+            placeholder="오늘의 기록…"
+            className="mt-3 w-full rounded-3xl border border-black/10 bg-[#F2F2F7] px-4 py-4 text-[15px] leading-6 outline-none focus:border-black/20"
+            style={{ minHeight: 160 }}
+          />
+        </section>
+
+        {/* Footer hint */}
+        <div className="mt-6 px-1 text-[12px] text-black/45">
+          운영 팁: 기능은 서버(API)에서 처리되고, 화면은 표시/수정만 합니다. UI를 바꿔도 DB 구조는 그대로 유지됩니다.
         </div>
-      </section>
+      </div>
     </main>
   );
 }
-
