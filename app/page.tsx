@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "@/lib/supabase";
 
 type PlanItem = {
   id: string;
@@ -58,6 +57,7 @@ export default function Home() {
 
   const [newName, setNewName] = useState("");
   const [newTime, setNewTime] = useState("09:00");
+  const [newCategory, setNewCategory] = useState<"운동" | "공부" | "기타">("기타");
 
   // local journal (iOS memo 느낌: 일단 로컬 유지)
   const journalKey = useMemo(() => `pbmo_journal_${dateKey}`, [dateKey]);
@@ -79,58 +79,64 @@ export default function Home() {
   }, [journal, journalKey]);
 
   async function apiGetPlan(targetDateKey: string) {
-  setLoading(true);
-  setError(null);
-  try {
-    const res = await fetch(`/api/plan?dateKey=${encodeURIComponent(targetDateKey)}`, {
-      cache: "no-store",
-    });
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/plan?dateKey=${encodeURIComponent(targetDateKey)}`,
+        {
+          cache: "no-store",
+        }
+      );
 
-    const json = await res.json();
+      const json = await res.json();
 
-    if (!res.ok || !json?.ok) {
-      throw new Error(json?.error || "계획을 불러오지 못했습니다.");
-    }
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || "계획을 불러오지 못했습니다.");
+      }
 
-    // ✅ 서버가 주는 형태: { ok:true, data: { status, plan:{ items:[...] } } }
-    const row = json.data;
+      // ✅ 서버가 주는 형태: { ok:true, data: { status, plan:{ items:[...] } } }
+      const row = json.data;
 
-    if (!row) {
+      if (!row) {
+        setStatus("draft");
+        setItems([]);
+        return;
+      }
+
+      setStatus(row.status || "draft");
+
+      const serverItems = Array.isArray(row?.plan?.items) ? row.plan.items : [];
+      // done이 없는 예전 데이터도 false로 보정
+      setItems(
+        serverItems.map((it: any) => ({
+          id: it.id,
+          name: it.name,
+          time: it.time || "09:00",
+          done: typeof it.done === "boolean" ? it.done : false,
+          reason: it.reason ?? null,
+          priority: it.priority ?? null,
+        }))
+      );
+    } catch (e: any) {
       setStatus("draft");
       setItems([]);
-      return;
+      setError(e?.message || "오류가 발생했습니다.");
+    } finally {
+      setLoading(false);
     }
-
-    setStatus(row.status || "draft");
-
-    const serverItems = Array.isArray(row?.plan?.items) ? row.plan.items : [];
-    // done이 없는 예전 데이터도 false로 보정
-    setItems(
-      serverItems.map((it: any) => ({
-        id: it.id,
-        name: it.name,
-        time: it.time || "09:00",
-        done: typeof it.done === "boolean" ? it.done : false,
-        reason: it.reason ?? null,
-        priority: it.priority ?? null,
-      }))
-    );
-  } catch (e: any) {
-    setStatus("draft");
-    setItems([]);
-    setError(e?.message || "오류가 발생했습니다.");
-  } finally {
-    setLoading(false);
   }
-}
 
   async function apiGenerateDraft() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/generate-draft?dateKey=${encodeURIComponent(dateKey)}`, {
-        method: "POST",
-      });
+      const res = await fetch(
+        `/api/generate-draft?dateKey=${encodeURIComponent(dateKey)}`,
+        {
+          method: "POST",
+        }
+      );
       const data = await res.json();
       if (!res.ok || !data?.ok) {
         throw new Error(data?.error || "초안 생성에 실패했습니다.");
@@ -144,42 +150,42 @@ export default function Home() {
   }
 
   async function apiSave(nextStatus: PlanStatus) {
-  setLoading(true);
-  setError(null);
-  try {
-    const payload = {
-  dateKey,
-  status: nextStatus,
-  plan: {
-    items: items.map((it) => ({
-      id: it.id,
-      name: it.name,
-      time: it.time,
-      reason: it.reason ?? null,
-      priority: it.priority ?? null,
-      done: it.done ?? false,
-    })),
-  },
-};
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = {
+        dateKey,
+        status: nextStatus,
+        plan: {
+          items: items.map((it) => ({
+            id: it.id,
+            name: it.name,
+            time: it.time,
+            reason: it.reason ?? null,
+            priority: it.priority ?? null,
+            done: it.done ?? false,
+          })),
+        },
+      };
 
-    const res = await fetch(`/api/plan`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+      const res = await fetch(`/api/plan`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-    const data = await res.json();
-    if (!res.ok || !data?.ok) {
-      throw new Error(data?.error || "저장에 실패했습니다.");
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "저장에 실패했습니다.");
+      }
+
+      setStatus(nextStatus);
+    } catch (e: any) {
+      setError(e?.message || "오류가 발생했습니다.");
+    } finally {
+      setLoading(false);
     }
-
-    setStatus(nextStatus);
-  } catch (e: any) {
-    setError(e?.message || "오류가 발생했습니다.");
-  } finally {
-    setLoading(false);
   }
-}
 
   useEffect(() => {
     apiGetPlan(dateKey);
@@ -190,7 +196,9 @@ export default function Home() {
   const progressPct = items.length ? Math.round((doneCount / items.length) * 100) : 0;
 
   function toggleDone(id: string) {
-    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, done: !it.done } : it)));
+    setItems((prev) =>
+      prev.map((it) => (it.id === id ? { ...it, done: !it.done } : it))
+    );
   }
 
   function updateTime(id: string, time: string) {
@@ -207,31 +215,34 @@ export default function Home() {
   }
 
   async function addItem() {
-  const name = newName.trim();
-  if (!name) return;
+    const name = newName.trim();
+    if (!name) return;
 
-  const id = crypto.randomUUID();
-  const time = clampTime(newTime);
+    const id = crypto.randomUUID();
+    const time = clampTime(newTime);
 
-  // 1) 화면에 먼저 추가 (기존대로)
-  setItems((prev) => [{ id, name, time, done: false }, ...prev]);
-  setNewName("");
+    // 1) 화면에 먼저 추가
+    setItems((prev) => [{ id, name, time, done: false }, ...prev]);
+    setNewName("");
 
-  // 2) DB(action_templates)에도 같이 저장 (이번 단계의 핵심)
-  const { error } = await supabase.from("action_templates").upsert({
-    id,
-    name,
-    default_time: time,
-    // category 컬럼이 이미 있으면 저장, 없으면 DB에서 default가 처리되거나 에러가 날 수 있음
-    category: "기타",
-  });
+    // 2) DB(action_templates)에 저장 (브라우저에서 supabase 직접 호출 금지)
+    const res = await fetch("/api/action-templates", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id,
+        name,
+        time,
+        category: newCategory,
+      }),
+    });
 
-  if (error) {
-    console.error("action_templates upsert error:", error);
-    alert("action_templates 저장 실패: " + error.message);
+    const data = await res.json();
+    if (!res.ok || !data?.ok) {
+      console.error("action_templates api error:", data);
+      alert("action_templates 저장 실패: " + (data?.error || "unknown"));
+    }
   }
-}
-
 
   const sortedItems = useMemo(() => {
     // iOS 느낌: 시간순 정렬 + done은 맨 아래
@@ -351,7 +362,7 @@ export default function Home() {
         <section className="mt-4 rounded-3xl bg-white p-4 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
           <div className="text-[13px] font-semibold text-black/80">행동 추가</div>
 
-          <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_140px_96px] sm:items-center">
+          <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_140px_160px_96px] sm:items-center">
             <input
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
@@ -367,6 +378,19 @@ export default function Home() {
                 onChange={(e) => setNewTime(clampTime(e.target.value))}
                 className="mt-0.5 w-full bg-transparent text-[15px] font-medium outline-none"
               />
+            </div>
+
+            <div className="rounded-2xl border border-black/10 bg-[#F2F2F7] px-4 py-3">
+              <div className="text-[11px] text-black/50">카테고리</div>
+              <select
+                value={newCategory}
+                onChange={(e) => setNewCategory(e.target.value as any)}
+                className="mt-0.5 w-full bg-transparent text-[15px] font-medium outline-none"
+              >
+                <option value="운동">운동</option>
+                <option value="공부">공부</option>
+                <option value="기타">기타</option>
+              </select>
             </div>
 
             <button
@@ -389,7 +413,8 @@ export default function Home() {
           <div className="space-y-2">
             {sortedItems.length === 0 ? (
               <div className="rounded-3xl bg-white p-5 text-[14px] text-black/55 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
-                아직 오늘 계획이 없습니다. <span className="font-semibold">초안 생성</span>을 눌러 시작하세요.
+                아직 오늘 계획이 없습니다. <span className="font-semibold">초안 생성</span>을 눌러
+                시작하세요.
               </div>
             ) : null}
 
@@ -406,9 +431,7 @@ export default function Home() {
                     onClick={() => toggleDone(it.id)}
                     className={cn(
                       "mt-0.5 h-6 w-6 shrink-0 rounded-full border",
-                      it.done
-                        ? "border-[#34C759] bg-[#34C759]"
-                        : "border-black/15 bg-white"
+                      it.done ? "border-[#34C759] bg-[#34C759]" : "border-black/15 bg-white"
                     )}
                     aria-label="toggle done"
                     title="완료 체크"
@@ -481,7 +504,8 @@ export default function Home() {
 
         {/* Footer hint */}
         <div className="mt-6 px-1 text-[12px] text-black/45">
-          운영 팁: 기능은 서버(API)에서 처리되고, 화면은 표시/수정만 합니다. UI를 바꿔도 DB 구조는 그대로 유지됩니다.
+          운영 팁: 기능은 서버(API)에서 처리되고, 화면은 표시/수정만 합니다. UI를 바꿔도 DB 구조는 그대로
+          유지됩니다.
         </div>
       </div>
     </main>
