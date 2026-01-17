@@ -2,22 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type PlanItem = {
+type Category = "운동" | "공부" | "기타";
+
+type ActionTemplate = {
   id: string;
   name: string;
-  time: string; // "HH:MM"
-  done: boolean;
-  reason?: string | null;
-  priority?: number | null;
-};
-
-type PlanStatus = "draft" | "confirmed";
-
-type PlanResponse = {
-  ok: boolean;
-  dateKey: string;
-  status: PlanStatus;
-  items: PlanItem[];
+  default_time: string;
+  category: Category;
+  is_active: boolean;
 };
 
 function todayKey(): string {
@@ -33,7 +25,6 @@ function cn(...v: Array<string | false | null | undefined>) {
 }
 
 function clampTime(t: string): string {
-  // basic guard: enforce "HH:MM"
   if (!t) return "09:00";
   const m = t.match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return "09:00";
@@ -51,154 +42,97 @@ export default function Home() {
   });
 
   const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState<PlanStatus>("draft");
-  const [items, setItems] = useState<PlanItem[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  // templates (오늘 계획은 templates 목록)
+  const [templates, setTemplates] = useState<ActionTemplate[]>([]);
+  // done ids for selected date
+  const [doneIds, setDoneIds] = useState<Set<string>>(new Set());
+
+  // weekly stats
+  const [weekRange, setWeekRange] = useState<{ weekStart: string; weekEnd: string } | null>(null);
+  const [weekStats, setWeekStats] = useState<Record<Category, { days: number; total: number }> | null>(
+    null
+  );
+
+  // add template inputs
   const [newName, setNewName] = useState("");
   const [newTime, setNewTime] = useState("09:00");
-  const [newCategory, setNewCategory] = useState<"운동" | "공부" | "기타">("기타");
+  const [newCategory, setNewCategory] = useState<Category>("기타");
 
-  // local journal (iOS memo 느낌: 일단 로컬 유지)
+  // local journal (그대로 유지)
   const journalKey = useMemo(() => `pbmo_journal_${dateKey}`, [dateKey]);
   const [journal, setJournal] = useState("");
 
   useEffect(() => {
     localStorage.setItem(LAST_DATE_KEY, dateKey);
   }, [dateKey]);
-useEffect(() => {
-  async function hydrateDoneFromLogs() {
-    try {
-      const res = await fetch(`/api/action-logs?dateKey=${encodeURIComponent(dateKey)}`, {
-        cache: "no-store",
-      });
-      const json = await res.json();
-      if (!res.ok || !json?.ok) return;
-
-      const ids = new Set<string>((json.data || []).map((r: any) => r.action_id));
-
-      setItems((prev) => prev.map((it) => ({ ...it, done: ids.has(it.id) })));
-    } catch {
-      // ignore
-    }
-  }
-
-  hydrateDoneFromLogs();
-}, [dateKey]);
 
   useEffect(() => {
-    // journal load
     const saved = localStorage.getItem(journalKey);
     setJournal(saved || "");
   }, [journalKey]);
 
   useEffect(() => {
-    // journal save
     localStorage.setItem(journalKey, journal);
   }, [journal, journalKey]);
 
-  async function apiGetPlan(targetDateKey: string) {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/plan?dateKey=${encodeURIComponent(targetDateKey)}`,
-        {
-          cache: "no-store",
-        }
-      );
+  async function loadTemplates() {
+  const res = await fetch("/api/action-templates", { cache: "no-store" });
+  const text = await res.text();
+  let json: any = null;
 
-      const json = await res.json();
-
-      if (!res.ok || !json?.ok) {
-        throw new Error(json?.error || "계획을 불러오지 못했습니다.");
-      }
-
-      // ✅ 서버가 주는 형태: { ok:true, data: { status, plan:{ items:[...] } } }
-      const row = json.data;
-
-      if (!row) {
-        setStatus("draft");
-        setItems([]);
-        return;
-      }
-
-      setStatus(row.status || "draft");
-
-      const serverItems = Array.isArray(row?.plan?.items) ? row.plan.items : [];
-      // done이 없는 예전 데이터도 false로 보정
-      setItems(
-        serverItems.map((it: any) => ({
-          id: it.id,
-          name: it.name,
-          time: it.time || "09:00",
-          done: typeof it.done === "boolean" ? it.done : false,
-          reason: it.reason ?? null,
-          priority: it.priority ?? null,
-        }))
-      );
-    } catch (e: any) {
-      setStatus("draft");
-      setItems([]);
-      setError(e?.message || "오류가 발생했습니다.");
-    } finally {
-      setLoading(false);
-    }
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`action-templates 응답이 JSON이 아닙니다. status=${res.status}`);
   }
 
-  async function apiGenerateDraft() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/generate-draft?dateKey=${encodeURIComponent(dateKey)}`,
-        {
-          method: "POST",
-        }
-      );
-      const data = await res.json();
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "초안 생성에 실패했습니다.");
-      }
-      await apiGetPlan(dateKey);
-    } catch (e: any) {
-      setError(e?.message || "오류가 발생했습니다.");
-    } finally {
-      setLoading(false);
-    }
+  if (!res.ok || !json?.ok) throw new Error(json?.error || "템플릿을 불러오지 못했습니다.");
+  setTemplates(json.data || []);
+}
+
+  async function loadDoneIds(targetDateKey: string) {
+    const res = await fetch(`/api/action-logs?dateKey=${encodeURIComponent(targetDateKey)}`, {
+      cache: "no-store",
+    });
+    const json = await res.json();
+    if (!res.ok || !json?.ok) throw new Error(json?.error || "로그를 불러오지 못했습니다.");
+    const ids = new Set<string>((json.data || []).map((r: any) => r.action_id));
+    setDoneIds(ids);
   }
 
-  async function apiSave(nextStatus: PlanStatus) {
+  async function loadWeekStats(targetDateKey: string) {
+  const res = await fetch(`/api/week-stats?dateKey=${encodeURIComponent(targetDateKey)}`, {
+    cache: "no-store",
+  });
+  const text = await res.text();
+  let json: any = null;
+
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`week-stats 응답이 JSON이 아닙니다. status=${res.status}`);
+  }
+
+  if (!res.ok || !json?.ok) throw new Error(json?.error || "주간 통계를 불러오지 못했습니다.");
+
+  setWeekRange({ weekStart: json.weekStart, weekEnd: json.weekEnd });
+
+  const data = json.data || {};
+  setWeekStats({
+    운동: data["운동"] || { days: 0, total: 7 },
+    공부: data["공부"] || { days: 0, total: 7 },
+    기타: data["기타"] || { days: 0, total: 7 },
+  });
+}
+
+
+  async function refreshAll() {
     setLoading(true);
     setError(null);
     try {
-      const payload = {
-        dateKey,
-        status: nextStatus,
-        plan: {
-          items: items.map((it) => ({
-            id: it.id,
-            name: it.name,
-            time: it.time,
-            reason: it.reason ?? null,
-            priority: it.priority ?? null,
-            done: it.done ?? false,
-          })),
-        },
-      };
-
-      const res = await fetch(`/api/plan`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "저장에 실패했습니다.");
-      }
-
-      setStatus(nextStatus);
+      await Promise.all([loadTemplates(), loadDoneIds(dateKey), loadWeekStats(dateKey)]);
     } catch (e: any) {
       setError(e?.message || "오류가 발생했습니다.");
     } finally {
@@ -207,122 +141,123 @@ useEffect(() => {
   }
 
   useEffect(() => {
-    apiGetPlan(dateKey);
+    refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dateKey]);
 
-  const doneCount = items.filter((x) => x.done).length;
-  const progressPct = items.length ? Math.round((doneCount / items.length) * 100) : 0;
-
-  async function toggleDone(id: string) {
-  // 1) 현재 done 상태를 확인
-  const current = items.find((x) => x.id === id);
-  if (!current) return;
-
-  // 2) 먼저 화면을 즉시 반영 (체감 중요)
-  const nextDone = !current.done;
-  setItems((prev) => prev.map((it) => (it.id === id ? { ...it, done: nextDone } : it)));
-
-  // 3) 서버에 로그 반영 (action_logs)
-  const res = await fetch("/api/action-logs", {
-    method: nextDone ? "POST" : "DELETE",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      actionId: id,
-      dateKey,
-    }),
-  });
-
-  const data = await res.json();
-  if (!res.ok || !data?.ok) {
-    // 실패하면 화면도 롤백
-    setItems((prev) =>
-      prev.map((it) => (it.id === id ? { ...it, done: !nextDone } : it))
-    );
-    alert("체크 저장 실패: " + (data?.error || "unknown"));
-  }
-}
-
-  function updateTime(id: string, time: string) {
-    const t = clampTime(time);
-    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, time: t } : it)));
-  }
-
-  function updateName(id: string, name: string) {
-    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, name } : it)));
-  }
-
-  function removeItem(id: string) {
-    setItems((prev) => prev.filter((it) => it.id !== id));
-  }
-
-  async function addItem() {
+  async function addTemplate() {
     const name = newName.trim();
     if (!name) return;
 
-    const id = crypto.randomUUID();
-    const time = clampTime(newTime);
+    setLoading(true);
+    setError(null);
+    try {
+      const id = crypto.randomUUID();
+      const time = clampTime(newTime);
 
-    // 1) 화면에 먼저 추가
-    setItems((prev) => [{ id, name, time, done: false }, ...prev]);
-    setNewName("");
+      const res = await fetch("/api/action-templates", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id,
+          name,
+          time,
+          category: newCategory,
+        }),
+      });
 
-    // 2) DB(action_templates)에 저장 (브라우저에서 supabase 직접 호출 금지)
-    const res = await fetch("/api/action-templates", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        id,
-        name,
-        time,
-        category: newCategory,
-      }),
-    });
+      const json = await res.json();
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "템플릿 저장 실패");
 
-    const data = await res.json();
-    if (!res.ok || !data?.ok) {
-      console.error("action_templates api error:", data);
-      alert("action_templates 저장 실패: " + (data?.error || "unknown"));
+      setNewName("");
+      await loadTemplates();
+    } catch (e: any) {
+      setError(e?.message || "오류가 발생했습니다.");
+    } finally {
+      setLoading(false);
     }
   }
 
-  const sortedItems = useMemo(() => {
-    // iOS 느낌: 시간순 정렬 + done은 맨 아래
-    const copy = [...items];
+  async function toggleDone(actionId: string) {
+    const nextDone = !doneIds.has(actionId);
+
+    // 1) UI 즉시 반영
+    setDoneIds((prev) => {
+      const copy = new Set(prev);
+      if (nextDone) copy.add(actionId);
+      else copy.delete(actionId);
+      return copy;
+    });
+
+    // 2) 서버 반영
+    const res = await fetch("/api/action-logs", {
+      method: nextDone ? "POST" : "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ actionId, dateKey }),
+    });
+
+    const json = await res.json();
+    if (!res.ok || !json?.ok) {
+      // 실패 시 롤백
+      setDoneIds((prev) => {
+        const copy = new Set(prev);
+        if (nextDone) copy.delete(actionId);
+        else copy.add(actionId);
+        return copy;
+      });
+      alert("체크 저장 실패: " + (json?.error || "unknown"));
+      return;
+    }
+
+    // 3) 주간 통계 갱신
+    await loadWeekStats(dateKey);
+  }
+
+  const sortedTemplates = useMemo(() => {
+    const copy = [...templates];
     copy.sort((a, b) => {
-      if (a.done !== b.done) return a.done ? 1 : -1;
-      return a.time.localeCompare(b.time);
+      const aDone = doneIds.has(a.id);
+      const bDone = doneIds.has(b.id);
+      if (aDone !== bDone) return aDone ? 1 : -1;
+      return (a.default_time || "09:00").localeCompare(b.default_time || "09:00");
     });
     return copy;
-  }, [items]);
+  }, [templates, doneIds]);
+
+  function categoryBadge(cat: Category) {
+    const cls =
+      cat === "운동"
+        ? "bg-emerald-50 text-emerald-700"
+        : cat === "공부"
+        ? "bg-sky-50 text-sky-700"
+        : "bg-zinc-100 text-zinc-700";
+    return (
+      <span className={cn("rounded-full px-2.5 py-1 text-[12px] font-semibold", cls)}>{cat}</span>
+    );
+  }
+
+  const weekCards: Array<{ cat: Category; label: string }> = [
+    { cat: "운동", label: "운동" },
+    { cat: "공부", label: "공부" },
+    { cat: "기타", label: "기타" },
+  ];
 
   return (
     <main className="min-h-screen bg-[#F2F2F7] text-[#111]">
-      {/* iOS-like top bar */}
       <div className="sticky top-0 z-20 border-b border-black/5 bg-white/80 backdrop-blur">
         <div className="mx-auto flex max-w-[760px] items-center justify-between px-4 py-3">
           <div className="flex items-baseline gap-2">
             <h1 className="text-[20px] font-semibold tracking-tight">PBMO</h1>
             <span className="text-[12px] text-black/50">1인용</span>
           </div>
-
-          <div className="flex items-center gap-2">
-            <span
-              className={cn(
-                "rounded-full px-2.5 py-1 text-[12px] font-medium",
-                status === "confirmed"
-                  ? "bg-emerald-50 text-emerald-700"
-                  : "bg-sky-50 text-sky-700"
-              )}
-            >
-              {status === "confirmed" ? "확정" : "초안"}
-            </span>
+          <div className="text-[12px] text-black/50">
+            {weekRange ? `${weekRange.weekStart} ~ ${weekRange.weekEnd}` : ""}
           </div>
         </div>
       </div>
 
       <div className="mx-auto max-w-[760px] px-4 pb-16 pt-4">
-        {/* Date + actions card */}
+        {/* Header card */}
         <section className="rounded-3xl bg-white p-4 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-3">
@@ -336,57 +271,41 @@ useEffect(() => {
                 />
               </div>
 
-              <div className="min-w-[120px]">
-                <div className="text-[11px] text-black/50">오늘 진행률</div>
-                <div className="mt-1 flex items-center gap-2">
-                  <div className="h-2 w-28 overflow-hidden rounded-full bg-[#E5E5EA]">
-                    <div
-                      className="h-full rounded-full bg-[#0A84FF]"
-                      style={{ width: `${progressPct}%` }}
-                    />
-                  </div>
-                  <div className="text-[13px] font-semibold">
-                    {doneCount}/{items.length}
-                  </div>
+              <div className="min-w-[220px]">
+                <div className="text-[11px] text-black/50">이번 주 카테고리별 수행 일수</div>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  {weekCards.map(({ cat }) => {
+                    const stat = weekStats?.[cat] ?? { days: 0, total: 7 };
+                    const pct = stat.total ? Math.round((stat.days / stat.total) * 100) : 0;
+                    return (
+                      <div key={cat} className="rounded-2xl bg-[#F2F2F7] px-3 py-2">
+                        <div className="flex items-center justify-between">
+                          <div className="text-[12px] font-semibold">{cat}</div>
+                          <div className="text-[12px] font-semibold">
+                            {stat.days}/{stat.total}
+                          </div>
+                        </div>
+                        <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#E5E5EA]">
+                          <div className="h-full rounded-full bg-[#0A84FF]" style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={apiGenerateDraft}
-                disabled={loading}
-                className={cn(
-                  "rounded-2xl px-3.5 py-2 text-[14px] font-semibold",
-                  "bg-[#0A84FF] text-white",
-                  "disabled:opacity-50"
-                )}
-              >
-                초안 생성
-              </button>
-              <button
-                onClick={() => apiSave("draft")}
-                disabled={loading}
-                className={cn(
-                  "rounded-2xl px-3.5 py-2 text-[14px] font-semibold",
-                  "bg-[#F2F2F7] text-black/85",
-                  "disabled:opacity-50"
-                )}
-              >
-                저장
-              </button>
-              <button
-                onClick={() => apiSave("confirmed")}
-                disabled={loading}
-                className={cn(
-                  "rounded-2xl px-3.5 py-2 text-[14px] font-semibold",
-                  "bg-[#111827] text-white",
-                  "disabled:opacity-50"
-                )}
-              >
-                확정
-              </button>
-            </div>
+            <button
+              onClick={refreshAll}
+              disabled={loading}
+              className={cn(
+                "rounded-2xl px-3.5 py-2 text-[14px] font-semibold",
+                "bg-[#111827] text-white",
+                "disabled:opacity-50"
+              )}
+            >
+              새로고침
+            </button>
           </div>
 
           {error ? (
@@ -395,14 +314,12 @@ useEffect(() => {
             </div>
           ) : null}
 
-          {loading ? (
-            <div className="mt-3 text-[12px] text-black/45">불러오는 중…</div>
-          ) : null}
+          {loading ? <div className="mt-3 text-[12px] text-black/45">불러오는 중…</div> : null}
         </section>
 
-        {/* Add item */}
+        {/* Add template */}
         <section className="mt-4 rounded-3xl bg-white p-4 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
-          <div className="text-[13px] font-semibold text-black/80">행동 추가</div>
+          <div className="text-[13px] font-semibold text-black/80">행동 추가 (템플릿)</div>
 
           <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_140px_160px_96px] sm:items-center">
             <input
@@ -426,7 +343,7 @@ useEffect(() => {
               <div className="text-[11px] text-black/50">카테고리</div>
               <select
                 value={newCategory}
-                onChange={(e) => setNewCategory(e.target.value as any)}
+                onChange={(e) => setNewCategory(e.target.value as Category)}
                 className="mt-0.5 w-full bg-transparent text-[15px] font-medium outline-none"
               >
                 <option value="운동">운동</option>
@@ -436,95 +353,76 @@ useEffect(() => {
             </div>
 
             <button
-              onClick={addItem}
-              className="rounded-2xl bg-[#34C759] px-4 py-3 text-[15px] font-semibold text-white"
+              onClick={addTemplate}
+              disabled={loading}
+              className={cn(
+                "rounded-2xl bg-[#34C759] px-4 py-3 text-[15px] font-semibold text-white",
+                "disabled:opacity-50"
+              )}
             >
               추가
             </button>
           </div>
-
-          <div className="mt-2 text-[12px] text-black/45">
-            팁: 시간 기반으로 정렬되며, 완료한 항목은 아래로 내려갑니다.
-          </div>
         </section>
 
-        {/* List */}
+        {/* Today plan (templates) */}
         <section className="mt-4">
           <div className="mb-2 px-1 text-[13px] font-semibold text-black/70">오늘 계획</div>
 
           <div className="space-y-2">
-            {sortedItems.length === 0 ? (
+            {sortedTemplates.length === 0 ? (
               <div className="rounded-3xl bg-white p-5 text-[14px] text-black/55 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
-                아직 오늘 계획이 없습니다. <span className="font-semibold">초안 생성</span>을 눌러
-                시작하세요.
+                아직 행동 템플릿이 없습니다. 위에서 행동을 추가하세요.
               </div>
             ) : null}
 
-            {sortedItems.map((it) => (
-              <div
-                key={it.id}
-                className={cn(
-                  "rounded-3xl bg-white p-4 shadow-[0_6px_20px_rgba(0,0,0,0.06)]",
-                  it.done && "opacity-70"
-                )}
-              >
-                <div className="flex items-start gap-3">
-                  <button
-                    onClick={() => toggleDone(it.id)}
-                    className={cn(
-                      "mt-0.5 h-6 w-6 shrink-0 rounded-full border",
-                      it.done ? "border-[#34C759] bg-[#34C759]" : "border-black/15 bg-white"
-                    )}
-                    aria-label="toggle done"
-                    title="완료 체크"
-                  >
-                    <div className={cn("h-full w-full", it.done ? "block" : "hidden")}>
-                      <div className="flex h-full w-full items-center justify-center text-white">
-                        ✓
-                      </div>
-                    </div>
-                  </button>
-
-                  <div className="min-w-0 flex-1">
-                    <input
-                      value={it.name}
-                      onChange={(e) => updateName(it.id, e.target.value)}
+            {sortedTemplates.map((t) => {
+              const done = doneIds.has(t.id);
+              return (
+                <div
+                  key={t.id}
+                  className={cn(
+                    "rounded-3xl bg-white p-4 shadow-[0_6px_20px_rgba(0,0,0,0.06)]",
+                    done && "opacity-70"
+                  )}
+                >
+                  <div className="flex items-start gap-3">
+                    <button
+                      onClick={() => toggleDone(t.id)}
                       className={cn(
-                        "w-full bg-transparent text-[16px] font-semibold outline-none",
-                        it.done ? "line-through text-black/50" : "text-black"
+                        "mt-0.5 h-6 w-6 shrink-0 rounded-full border",
+                        done ? "border-[#34C759] bg-[#34C759]" : "border-black/15 bg-white"
                       )}
-                    />
+                      aria-label="toggle done"
+                      title="완료 체크"
+                    >
+                      <div className={cn("h-full w-full", done ? "block" : "hidden")}>
+                        <div className="flex h-full w-full items-center justify-center text-white">✓</div>
+                      </div>
+                    </button>
 
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <div className="rounded-2xl border border-black/10 bg-[#F2F2F7] px-3 py-2">
-                        <div className="text-[11px] text-black/50">시간</div>
-                        <input
-                          type="time"
-                          value={clampTime(it.time)}
-                          onChange={(e) => updateTime(it.id, e.target.value)}
-                          className="mt-0.5 bg-transparent text-[14px] font-semibold outline-none"
-                        />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className={cn("text-[16px] font-semibold", done && "line-through text-black/50")}>
+                          {t.name}
+                        </div>
+                        {categoryBadge(t.category)}
                       </div>
 
-                      {it.reason ? (
-                        <div className="min-w-[180px] flex-1 rounded-2xl bg-[#F2F2F7] px-3 py-2">
-                          <div className="text-[11px] text-black/50">추천 이유</div>
-                          <div className="mt-0.5 text-[13px] text-black/70">{it.reason}</div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <div className="rounded-2xl border border-black/10 bg-[#F2F2F7] px-3 py-2">
+                          <div className="text-[11px] text-black/50">시간</div>
+                          <div className="mt-0.5 text-[14px] font-semibold">{clampTime(t.default_time)}</div>
                         </div>
-                      ) : null}
+                        <div className="text-[12px] text-black/45">
+                          체크하면 action_logs에 날짜별로 기록됩니다.
+                        </div>
+                      </div>
                     </div>
                   </div>
-
-                  <button
-                    onClick={() => removeItem(it.id)}
-                    className="rounded-2xl bg-[#FF3B30] px-3 py-2 text-[13px] font-semibold text-white"
-                    title="삭제"
-                  >
-                    삭제
-                  </button>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
 
@@ -544,10 +442,8 @@ useEffect(() => {
           />
         </section>
 
-        {/* Footer hint */}
         <div className="mt-6 px-1 text-[12px] text-black/45">
-          운영 팁: 기능은 서버(API)에서 처리되고, 화면은 표시/수정만 합니다. UI를 바꿔도 DB 구조는 그대로
-          유지됩니다.
+          운영 팁: 체크는 상태가 아니라 action_logs(로그)로 누적됩니다. 주간 통계는 로그 기반으로 계산됩니다.
         </div>
       </div>
     </main>

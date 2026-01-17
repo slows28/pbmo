@@ -1,6 +1,30 @@
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
+export async function GET(req: Request) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const dateKey = searchParams.get("dateKey");
+
+    if (!dateKey) {
+      return NextResponse.json({ ok: false, error: "dateKey required" }, { status: 400 });
+    }
+
+    const { data, error } = await supabase
+      .from("action_logs")
+      .select("action_id")
+      .eq("date_key", dateKey);
+
+    if (error) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ ok: true, data });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const { actionId, dateKey } = await req.json();
@@ -18,18 +42,12 @@ export async function POST(req: Request) {
     });
 
     if (error) {
-      return NextResponse.json(
-        { ok: false, error: error.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
     return NextResponse.json({ ok: true });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
   }
 }
 
@@ -51,49 +69,11 @@ export async function DELETE(req: Request) {
       .eq("date_key", dateKey);
 
     if (error) {
-      return NextResponse.json(
-        { ok: false, error: error.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
     return NextResponse.json({ ok: true });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e.message },
-      { status: 500 }
-    );
-  }
-}
-export async function GET(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const dateKey = searchParams.get("dateKey");
-
-    if (!dateKey) {
-      return NextResponse.json(
-        { ok: false, error: "dateKey required" },
-        { status: 400 }
-      );
-    }
-
-    const { data, error } = await supabase
-      .from("action_logs")
-      .select("action_id")
-      .eq("date_key", dateKey);
-
-    if (error) {
-      return NextResponse.json(
-        { ok: false, error: error.message },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({ ok: true, data });
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
   }
 }
