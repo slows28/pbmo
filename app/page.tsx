@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "@/lib/supabase";
 
 type PlanItem = {
   id: string;
@@ -205,13 +206,32 @@ export default function Home() {
     setItems((prev) => prev.filter((it) => it.id !== id));
   }
 
-  function addItem() {
-    const name = newName.trim();
-    if (!name) return;
-    const id = crypto.randomUUID();
-    setItems((prev) => [{ id, name, time: clampTime(newTime), done: false }, ...prev]);
-    setNewName("");
+  async function addItem() {
+  const name = newName.trim();
+  if (!name) return;
+
+  const id = crypto.randomUUID();
+  const time = clampTime(newTime);
+
+  // 1) 화면에 먼저 추가 (기존대로)
+  setItems((prev) => [{ id, name, time, done: false }, ...prev]);
+  setNewName("");
+
+  // 2) DB(action_templates)에도 같이 저장 (이번 단계의 핵심)
+  const { error } = await supabase.from("action_templates").upsert({
+    id,
+    name,
+    default_time: time,
+    // category 컬럼이 이미 있으면 저장, 없으면 DB에서 default가 처리되거나 에러가 날 수 있음
+    category: "기타",
+  });
+
+  if (error) {
+    console.error("action_templates upsert error:", error);
+    alert("action_templates 저장 실패: " + error.message);
   }
+}
+
 
   const sortedItems = useMemo(() => {
     // iOS 느낌: 시간순 정렬 + done은 맨 아래
