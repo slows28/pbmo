@@ -66,6 +66,25 @@ export default function Home() {
   useEffect(() => {
     localStorage.setItem(LAST_DATE_KEY, dateKey);
   }, [dateKey]);
+useEffect(() => {
+  async function hydrateDoneFromLogs() {
+    try {
+      const res = await fetch(`/api/action-logs?dateKey=${encodeURIComponent(dateKey)}`, {
+        cache: "no-store",
+      });
+      const json = await res.json();
+      if (!res.ok || !json?.ok) return;
+
+      const ids = new Set<string>((json.data || []).map((r: any) => r.action_id));
+
+      setItems((prev) => prev.map((it) => ({ ...it, done: ids.has(it.id) })));
+    } catch {
+      // ignore
+    }
+  }
+
+  hydrateDoneFromLogs();
+}, [dateKey]);
 
   useEffect(() => {
     // journal load
