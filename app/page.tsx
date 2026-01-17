@@ -195,11 +195,34 @@ export default function Home() {
   const doneCount = items.filter((x) => x.done).length;
   const progressPct = items.length ? Math.round((doneCount / items.length) * 100) : 0;
 
-  function toggleDone(id: string) {
+  async function toggleDone(id: string) {
+  // 1) 현재 done 상태를 확인
+  const current = items.find((x) => x.id === id);
+  if (!current) return;
+
+  // 2) 먼저 화면을 즉시 반영 (체감 중요)
+  const nextDone = !current.done;
+  setItems((prev) => prev.map((it) => (it.id === id ? { ...it, done: nextDone } : it)));
+
+  // 3) 서버에 로그 반영 (action_logs)
+  const res = await fetch("/api/action-logs", {
+    method: nextDone ? "POST" : "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      actionId: id,
+      dateKey,
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data?.ok) {
+    // 실패하면 화면도 롤백
     setItems((prev) =>
-      prev.map((it) => (it.id === id ? { ...it, done: !it.done } : it))
+      prev.map((it) => (it.id === id ? { ...it, done: !nextDone } : it))
     );
+    alert("체크 저장 실패: " + (data?.error || "unknown"));
   }
+}
 
   function updateTime(id: string, time: string) {
     const t = clampTime(time);
