@@ -1,49 +1,85 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
+import { createClient } from "@supabase/supabase-js";
 
-export async function GET() {
-  try {
-    const { data, error } = await supabase
-      .from("action_templates")
-      .select("id,name,default_time,category,created_at")
-      // ✅ is_active 필터 제거
-      .order("created_at", { ascending: false });
+const supabase = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { persistSession: false } }
+);
 
-    if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-    }
-
-    return NextResponse.json({ ok: true, data: data ?? [] });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || "server error" }, { status: 500 });
-  }
+function clampTime(t: string): string {
+  if (!t) return "09:00";
+  const m = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return "09:00";
+  let hh = Math.min(23, Math.max(0, Number(m[1])));
+  let mm = Math.min(59, Math.max(0, Number(m[2])));
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
 }
 
-export async function POST(req: Request) {
-  try {
-    const body = await req.json();
-    const { id, name, time, category } = body;
+// GET: 템플릿 전체 조회 (start/end 포함)
+export async function GET() {
+  const { data, error } = await supabase
+    .from("action_templates")
+    .select("id,name,category,start_time,end_time,default_time,created_at")
+    .order("created_at", { ascending: true });
 
-    if (!id || !name) {
-      return NextResponse.json({ ok: false, error: "id/name required" }, { status: 400 });
-    }
-
-    const payload = {
-      id,
-      name,
-      default_time: time ?? "09:00",
-      category: category ?? "기타",
-    };
-
-    // ✅ upsert: 같은 id면 업데이트, 없으면 생성
-    const { error } = await supabase.from("action_templates").upsert(payload);
-
-    if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-    }
-
-    return NextResponse.json({ ok: true });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || "server error" }, { status: 500 });
+  if (error) {
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
+  return NextResponse.json({ ok: true, data: data ?? [] });
+}
+
+// POST: upsert (start/end 저장)
+export async function POST(req: Request) {
+  const body = await req.json().catch(() => null);
+
+  const id = String(body?.id ?? "");
+  const name = String(body?.name ?? "").trim();
+  const category = body?.category;
+
+  // 호환: body.time / body.default_time로 와도 start_time으로 처리
+  const start_time = clampTime(String(body?.start_time ?? body?.time ?? body?.default_time ?? "09:00"));
+  const end_time = clampTime(String(body?.end_time ?? "10:00"));
+
+  if (!id || !name || !category) {
+    return NextResponse.json({ ok: false, error: "id/name/category는 필수입니다." }, { status: 400 });
+  }
+
+  const payload = {
+    id,
+    name,
+    category,
+    start_time,
+    end_time,
+    // 과거 호환(선택): default_time도 같이 맞춰둠
+    default_time: start_time,
+  };
+
+  const { error } = await supabase.from("action_templates").upsert(payload, { onConflict: "id" });
+
+  if (error) {
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true });
+}
+
+// DELETE: 템플릿 삭제 (관련 로그 먼저 삭제)
+export async function DELETE(req: Request) {
+  const body = await req.json().catch(() => null);
+  const id = String(body?.id ?? "").trim();
+
+  if (!id) {
+    return NextResponse.json({ ok: false, error: "id는 필수입니다." }, { status: 400 });
+  }
+
+  // 1) 해당 템플릿의 로그 삭제
+  const { error: e1 } = await supabase.from("action_logs").delete().eq("action_id", id);
+  if (e1) return NextResponse.json({ ok: false, error: e1.message }, { status: 500 });
+
+  // 2) 템플릿 삭제
+  const { error: e2 } = await supabase.from("action_templates").delete().eq("id", id);
+  if (e2) return NextResponse.json({ ok: false, error: e2.message }, { status: 500 });
+
+  return NextResponse.json({ ok: true });
 }
